@@ -34,9 +34,6 @@ import audit
 
 #### FLAGS
 FLAGS = flags.FLAGS
-flags.DEFINE_boolean(
-    'dpsgd', True, 'If True, train with DP-SGD. If False, '
-    'train with vanilla SGD.')
 flags.DEFINE_float('learning_rate', 0.15, 'Learning rate for training')
 flags.DEFINE_float('noise_multiplier', 1.1,
                    'Ratio of the standard deviation to the clipping norm')
@@ -52,28 +49,13 @@ flags.DEFINE_integer(
 FLAGS = flags.FLAGS
 
 
-def compute_epsilon(train_size):
-  """Computes epsilon value for given hyperparameters."""
-  if FLAGS.noise_multiplier == 0.0:
-    return float('inf')
-  orders = [1 + x / 10. for x in range(1, 100)] + list(range(12, 64))
-  sampling_probability = FLAGS.batch_size / train_size
-  steps = FLAGS.epochs * train_size / FLAGS.batch_size
-  rdp = compute_rdp(q=sampling_probability,
-                    noise_multiplier=FLAGS.noise_multiplier,
-                    steps=steps,
-                    orders=orders)
-  # Delta is set to approximate 1 / (number of training points).
-  return get_privacy_spent(orders, rdp, target_delta=1e-5)[0]
-
-def build_model(x):
-  model = tf.keras.Sequential([tf.keras.layers.Dense(1, input_shape=(x.shape[1],),
-      use_bias=False, kernel_initializer=tf.keras.initializers.Zeros())])
-  return model
-
-
-def train_model(model, train_x, train_y):
+def train_model(train_x, train_y):
   """Train the model on given data."""
+  
+  model = tf.keras.Sequential([
+      tf.keras.layers.Dense(1, input_shape=(train_x.shape[1],), use_bias=False,
+                            kernel_initializer=tf.keras.initializers.Zeros())])
+  
   #optimizer = dp_optimizer_vectorized.VectorizedDPSGD(
   optimizer = DPKerasSGDOptimizer(
       l2_norm_clip=FLAGS.l2_norm_clip,
@@ -82,6 +64,7 @@ def train_model(model, train_x, train_y):
       learning_rate=FLAGS.learning_rate)
 
   #(.5-x.w)^2 -> 2(.5-x.w)x
+  #x.w = 0: 2(.5-x.w)x = x
   loss = tf.keras.losses.MeanSquaredError()
 
   # Compile model with Keras
@@ -92,27 +75,20 @@ def train_model(model, train_x, train_y):
             epochs=FLAGS.epochs,
             validation_data=(train_x, train_y),
             batch_size=FLAGS.batch_size,
-            verbose=0)
+            verbose=1)
   return model
 
 
 def membership_test(model, pois_x, pois_y):
   """Membership inference - detect poisoning."""
   return model.predict(pois_x)
-  return model.trainable_weights[0].numpy().ravel()
+  #return model.trainable_weights[0].numpy().ravel()
 
-
-def gen_data(n, d):
-  """Make binomial dataset."""
-  x = np.random.normal(size=(n, d))  # (np.random.uniform(size=(n, d)) > 0.5)*2 - 1
-  y = np.ones(shape=(n,))/2.
-  return x, y
 
 def train_and_score(dataset):
   """Complete training run with membership inference score."""
   x, y, (pois_x, pois_y) = dataset
-  model = build_model(x)
-  model = train_model(model, x, y)
+  model = train_model(x, y)
   return membership_test(model, pois_x, pois_y)
 
 
