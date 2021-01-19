@@ -94,18 +94,9 @@ def compute_epsilon_and_acc(poison_arr, unpois_arr, threshold, alpha, pois_ct):
   return epsilon, acc
 
 
-def run_experiment(args):
-  script, name, i, is_pois = args
-  cmd = f"python {script} --name={name} --is_pois={is_pois} --i={i}"
-  print(cmd)
-  process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-  out, err = process.communicate()
-  print(out)
-  return float(out.split()[-1])
-
 class AuditAttack:
   """Audit attack class. Generates poisoning, then runs auditing algorithm."""
-  def __init__(self, trn_x, trn_y, name, train_script):
+  def __init__(self, trn_x, trn_y, train_function):  # name, train_script):
     """
     trn_x: training features
     trn_y: training labels
@@ -113,8 +104,10 @@ class AuditAttack:
     train_script: command for running the attack
     """
     self.trn_x, self.trn_y = trn_x, trn_y
-    self.train_script = train_script
-    self.name = name
+    self.train_function = train_function
+    self.poisoning = None
+    #self.train_script = train_script
+    #self.name = name
 
   def make_poisoning(self, pois_ct, attack_type, l2_norm=10):
     return attacks.make_many_pois(self.trn_x, self.trn_y, [pois_ct],
@@ -124,24 +117,29 @@ class AuditAttack:
     """Uses multiprocessing to run all training experiments."""
     pool = mp.Pool(num_jobs)
     
-    poison_args = [(self.train_script, self.name, i, 1) for i in range(num_trials)]
-    unpois_args = [(self.train_script, self.name, i, 0) for i in range(num_trials)]
+    (pois_x1, pois_y1), (pois_x2, pois_y2) = self.poisoning['data']
+    sample_x, sample_y = self.poisoning['pois']
 
-    poison_scores = pool.map(run_experiment, poison_args)
-    unpois_scores = pool.map(run_experiment, unpois_args)
+    poison_args = [(pois_x1, pois_y1, sample_x, sample_y, i) for i in range(num_trials)]
+    unpois_args = [(pois_x2, pois_y2, sample_x, sample_y, num_trials + i) for i in range(num_trials)]
+
+    poison_scores = pool.map(self.train_function, poison_args)
+    unpois_scores = pool.map(self.train_function, unpois_args)
 
     return poison_scores, unpois_scores
 
   def run(self, pois_ct, attack_type, num_trials, num_jobs, alpha=0.05,
           threshold=None, l2_norm=10):
     """Complete auditing algorithm."""
-    pois_datasets = self.make_poisoning(pois_ct, attack_type, l2_norm=l2_norm)
-    (pois_x1, pois_y1), (pois_x2, pois_y2) = pois_datasets[pois_ct]
-    assert np.allclose(pois_x1, pois_x2)
-    pois_diff = (pois_y1 - pois_y2)
-    assert np.unique(np.nonzero(pois_diff)[0]).size == pois_ct
-    sample_x, sample_y = pois_datasets["pois"]
-    np.save(self.name, (pois_x1, pois_y1, pois_x2, pois_y2, sample_x, sample_y))
+    if self.poisoning is None:
+      self.poisoning = self.make_poisoning(pois_ct, attack_type, l2_norm=l2_norm)
+      self.poisoning['data'] = self.poisoning[pois_ct]
+    #(pois_x1, pois_y1), (pois_x2, pois_y2) = self.poisoning[pois_ct]
+    #assert np.allclose(pois_x1, pois_x2)
+    #pois_diff = (pois_y1 - pois_y2)
+    #assert np.unique(np.nonzero(pois_diff)[0]).size == pois_ct
+    #sample_x, sample_y = self.poisoning["pois"]
+    #np.save(self.name, (pois_x1, pois_y1, pois_x2, pois_y2, sample_x, sample_y))
 
     poison_scores, unpois_scores = self.run_experiments(num_trials, num_jobs)
 

@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow_privacy.privacy.analysis.rdp_accountant import compute_rdp
 from tensorflow_privacy.privacy.analysis.rdp_accountant import get_privacy_spent
@@ -65,7 +65,8 @@ def train_model(train_x, train_y):
 
   #(.5-x.w)^2 -> 2(.5-x.w)x
   #x.w = 0: 2(.5-x.w)x = x
-  loss = tf.keras.losses.MeanSquaredError()
+  loss = tf.keras.losses.MeanSquaredError(reduction=tf.losses.Reduction.NONE)
+  #loss = tf.keras.losses.MeanSquaredError()
 
   # Compile model with Keras
   model.compile(optimizer=optimizer, loss=loss, metrics=['mse'])
@@ -96,7 +97,7 @@ def main(unused_argv):
   del unused_argv
   
   np.random.seed(FLAGS.i)
-  tf.random.set_seed(FLAGS.i)
+  tf.set_random_seed(FLAGS.i)
   
   dataset = np.load(f"{FLAGS.name}.npy", allow_pickle=True)
   (pois_x1, pois_y1), (pois_x2, pois_y2), (sample_x, sample_y) = dataset

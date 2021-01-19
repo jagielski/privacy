@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow_privacy.privacy.analysis.rdp_accountant import compute_rdp
 from tensorflow_privacy.privacy.analysis.rdp_accountant import get_privacy_spent
@@ -101,9 +101,8 @@ def train_model(model, train_x, train_y):
       num_microbatches=FLAGS.microbatches,
       learning_rate=FLAGS.learning_rate)
 
-  loss = tf.nn.softmax_cross_entropy_with_logits
-  #tf.keras.losses.CategoricalCrossentropy(
-  #        from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+  loss = tf.keras.losses.CategoricalCrossentropy(
+          from_logits=True, reduction=tf.losses.Reduction.NONE)
 
   # Compile model with Keras
   model.compile(optimizer=optimizer, loss=loss, metrics=['accuracy'])
@@ -125,10 +124,9 @@ def membership_test(model, pois_x, pois_y):
 
 def train_and_score(dataset):
   """Complete training run with membership inference score."""
-  x, y, (pois_x, pois_y) = dataset
-  np.random.seed(None)
-  tf_seed = np.random.randint(0, 1e6)
-  tf.random.set_seed(tf_seed)
+  x, y, pois_x, pois_y, i = dataset
+  np.random.seed(i)
+  tf.set_random_seed(i)
   model = build_model(x, y)
   model = train_model(model, x, y)
   return membership_test(model, pois_x, pois_y)
@@ -142,7 +140,7 @@ def main(unused_argv):
   (trn_x, trn_y), _ = tf.keras.datasets.fashion_mnist.load_data()
   trn_inds = np.where(trn_y < 2)[0]
 
-  trn_x = trn_x[trn_inds] / 255.
+  trn_x = -.5 + trn_x[trn_inds] / 255.
   trn_y = np.eye(2)[trn_y[trn_inds]]
 
   ss_inds = np.random.choice(trn_x.shape[0], trn_x.shape[0]//2, replace=False)

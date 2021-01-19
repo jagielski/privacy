@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from tensorflow_privacy.privacy.analysis.rdp_accountant import compute_rdp
 from tensorflow_privacy.privacy.analysis.rdp_accountant import get_privacy_spent
@@ -77,15 +77,16 @@ def build_model(x, y):
 
 def train_model(model, train_x, train_y):
   """Train the model on given data."""
-  #optimizer = dp_optimizer_vectorized.VectorizedDPSGD(
-  optimizer = DPKerasSGDOptimizer(
+  optimizer = dp_optimizer_vectorized.VectorizedDPSGD(
+  #optimizer = DPKerasSGDOptimizer(
       l2_norm_clip=FLAGS.l2_norm_clip,
       noise_multiplier=FLAGS.noise_multiplier,
       num_microbatches=FLAGS.microbatches,
       learning_rate=FLAGS.learning_rate)
 
   #(.5-x.w)^2 -> 2(.5-x.w)x
-  loss = tf.keras.losses.MeanSquaredError()
+  loss = tf.keras.losses.MeanSquaredError(reduction=tf.losses.Reduction.NONE)
+  #loss = tf.keras.losses.MeanSquaredError()
 
   # Compile model with Keras
   model.compile(optimizer=optimizer, loss=loss, metrics=['mse'])
@@ -101,7 +102,9 @@ def train_model(model, train_x, train_y):
 
 def membership_test(model, pois_x, pois_y):
   """Membership inference - detect poisoning."""
-  return model.trainable_weights[0].numpy().ravel()
+  return model.predict(pois_x)
+
+  #return model.trainable_weights[0].numpy().ravel()
 
 
 def gen_data(n, d):
@@ -112,9 +115,9 @@ def gen_data(n, d):
 
 def train_and_score(dataset):
   """Complete training run with membership inference score."""
-  x, y, (pois_x, pois_y), i = dataset
+  x, y, pois_x, pois_y, i = dataset
   np.random.seed(i)
-  tf.random.set_seed(i)
+  tf.set_random_seed(i)
   model = build_model(x, y)
   model = train_model(model, x, y)
   return membership_test(model, pois_x, pois_y)
@@ -127,14 +130,7 @@ def main(unused_argv):
 
   x, y = gen_data(1 + FLAGS.batch_size, FLAGS.d) 
   
-  train_args = f"--noise_multiplier={FLAGS.noise_multiplier} "
-  train_args += f"--learning_rate={FLAGS.learning_rate} "
-  train_args += f"--l2_norm_clip={FLAGS.l2_norm_clip} "
-  train_args += f"--batch_size={FLAGS.batch_size} "
-  train_args += f"--epochs={FLAGS.epochs} "
-  train_args += f"--microbatches={FLAGS.microbatches}"
-  
-  auditor = audit.AuditAttack(x, y, "mean_audit", f"mean_audit_trainer.py {train_args}")
+  auditor = audit.AuditAttack(x, y, train_and_score)  #"mean_audit", f"mean_audit_trainer.py {train_args}")
   pois_x1, pois_x2 = x[:-1].copy(), x[:-1].copy()
   pois_x1[-1] = x[-1]
   pois_y = y[:-1]
@@ -142,20 +138,21 @@ def main(unused_argv):
   assert np.unique(np.nonzero(pois_x1 - pois_x2)[0]).size==1
 
   pois_data = (pois_x1, pois_y), (pois_x2, pois_y), (target_x, y[-1]) 
-  np.save("mean_audit", pois_data)
+  poisoning = {}
+  poisoning["data"] = (pois_data[0], pois_data[1])
+  poisoning["pois"] = pois_data[2]
+  auditor.poisoning = poisoning
+  
   pois_scores, unpois_scores = auditor.run_experiments(FLAGS.num_trials,
                                                        FLAGS.num_jobs)
 
-  print(np.array(pois_scores))
-  print(np.array(unpois_scores))
   thresh, _, _ = audit.compute_results(pois_scores, unpois_scores, 1,
                               alpha=FLAGS.alpha, threshold=None)
+  
   pois_scores, unpois_scores = auditor.run_experiments(FLAGS.num_trials,
                                                        FLAGS.num_jobs)
-  #pois_scores, unpois_scores = auditor.run_experiments(
-  #        pois_data, (target_x, y[-1]), FLAGS.num_trials, FLAGS.num_jobs)
   _, eps, acc = audit.compute_results(pois_scores, unpois_scores, 1,
-                              alpha=FLAGS.alpha, threshold=None)
+                              alpha=FLAGS.alpha, threshold=thresh)
  
   epsilon_ub = compute_epsilon(FLAGS.batch_size)
 
