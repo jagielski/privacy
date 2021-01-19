@@ -45,19 +45,20 @@ def apply_dp_sgd_analysis(q, sigma, steps, orders, delta):
   return eps, opt_order
 
 
-def compute_noise(n, batch_size, target_epsilon, epochs, delta):
+def compute_noise(n, batch_size, target_epsilon, epochs, delta, min_noise):
   """Compute noise based on the given hyperparameters."""
   q = batch_size / n  # q - the sampling ratio.
   if q > 1:
-    raise app.UsageError('n must be larger than the batch size.')
+    raise app.UsageError('Batch size must be at most n.')
   orders = ([1.25, 1.5, 1.75, 2., 2.25, 2.5, 3., 3.5, 4., 4.5] +
             list(range(5, 64)) + [128, 256, 512])
   steps = int(math.ceil(epochs * n / batch_size))
 
-  init_noise = 1e-5  # minimum possible noise
+  init_noise = min_noise  # minimum possible noise
   init_epsilon, _ = apply_dp_sgd_analysis(q, init_noise, steps, orders, delta)
 
-  if init_epsilon < target_epsilon:  # 1e-5 was an overestimate
+  if init_epsilon < target_epsilon:  # min_noise was an overestimate
+    print("min_noise too large for target epsilon.")
     return 0
 
   cur_epsilon = init_epsilon
