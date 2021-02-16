@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =============================================================================
-"""Training a deep NN on IMDB reviews with differentially private Adam optimizer."""
+"""Auditing a model which computes the mean of a synthetic dataset.
+   This gives an example for instrumenting the auditor to audit a user-given sample."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -24,7 +25,6 @@ import tensorflow.compat.v1 as tf
 from tensorflow_privacy.privacy.analysis.rdp_accountant import compute_rdp
 from tensorflow_privacy.privacy.analysis.rdp_accountant import get_privacy_spent
 from tensorflow_privacy.privacy.optimizers import dp_optimizer_vectorized
-from tensorflow_privacy.privacy.optimizers.dp_optimizer_keras import DPKerasSGDOptimizer
 
 
 from absl import app
@@ -34,9 +34,6 @@ import audit
 
 #### FLAGS
 FLAGS = flags.FLAGS
-flags.DEFINE_boolean(
-    'dpsgd', True, 'If True, train with DP-SGD. If False, '
-    'train with vanilla SGD.')
 flags.DEFINE_float('learning_rate', 0.15, 'Learning rate for training')
 flags.DEFINE_float('noise_multiplier', 1.1,
                    'Ratio of the standard deviation to the clipping norm')
@@ -48,7 +45,6 @@ flags.DEFINE_integer(
     'microbatches', 250, 'Number of microbatches '
     '(must evenly divide batch_size)')
 flags.DEFINE_string('attack_type', "clip_aware", 'clip_aware or backdoor')
-flags.DEFINE_integer('num_jobs', 10, 'Number of jobs for parallelism')
 flags.DEFINE_integer('num_trials', 100, 'Number of trials for auditing')
 flags.DEFINE_float('attack_l2_norm', 10, 'Size of poisoning data')
 flags.DEFINE_float('alpha', 0.05, '1-confidence')
@@ -70,7 +66,9 @@ def compute_epsilon(train_size):
   return get_privacy_spent(orders, rdp, target_delta=1e-5)[0]
 
 def build_model(x, y):
-  model = tf.keras.Sequential([tf.keras.layers.Dense(1, input_shape=(FLAGS.d,),
+  del x, y
+  model = tf.keras.Sequential([tf.keras.layers.Dense(
+      1, input_shape=(FLAGS.d,),
       use_bias=False, kernel_initializer=tf.keras.initializers.Zeros())])
   return model
 
@@ -78,15 +76,13 @@ def build_model(x, y):
 def train_model(model, train_x, train_y):
   """Train the model on given data."""
   optimizer = dp_optimizer_vectorized.VectorizedDPSGD(
-  #optimizer = DPKerasSGDOptimizer(
       l2_norm_clip=FLAGS.l2_norm_clip,
       noise_multiplier=FLAGS.noise_multiplier,
       num_microbatches=FLAGS.microbatches,
       learning_rate=FLAGS.learning_rate)
 
-  #(.5-x.w)^2 -> 2(.5-x.w)x
+  # gradient of (.5-x.w)^2 is 2(.5-x.w)x
   loss = tf.keras.losses.MeanSquaredError(reduction=tf.losses.Reduction.NONE)
-  #loss = tf.keras.losses.MeanSquaredError()
 
   # Compile model with Keras
   model.compile(optimizer=optimizer, loss=loss, metrics=['mse'])
@@ -102,16 +98,16 @@ def train_model(model, train_x, train_y):
 
 def membership_test(model, pois_x, pois_y):
   """Membership inference - detect poisoning."""
+  del pois_y
   return model.predict(pois_x)
-
-  #return model.trainable_weights[0].numpy().ravel()
 
 
 def gen_data(n, d):
   """Make binomial dataset."""
-  x = np.random.normal(size=(n, d))  # (np.random.uniform(size=(n, d)) > 0.5)*2 - 1
+  x = np.random.normal(size=(n, d))
   y = np.ones(shape=(n,))/2.
   return x, y
+
 
 def train_and_score(dataset):
   """Complete training run with membership inference score."""
@@ -128,37 +124,33 @@ def main(unused_argv):
   # Load training and test data.
   np.random.seed(0)
 
-  x, y = gen_data(1 + FLAGS.batch_size, FLAGS.d) 
-  
-  auditor = audit.AuditAttack(x, y, train_and_score)  #"mean_audit", f"mean_audit_trainer.py {train_args}")
+  x, y = gen_data(1 + FLAGS.batch_size, FLAGS.d)
+
+  auditor = audit.AuditAttack(x, y, train_and_score)
+
+  # we will instrument the auditor to simply backdoor the last feature
   pois_x1, pois_x2 = x[:-1].copy(), x[:-1].copy()
   pois_x1[-1] = x[-1]
   pois_y = y[:-1]
-  target_x =  x[-1][None, :]
-  assert np.unique(np.nonzero(pois_x1 - pois_x2)[0]).size==1
+  target_x = x[-1][None, :]
+  assert np.unique(np.nonzero(pois_x1 - pois_x2)[0]).size == 1
 
-  pois_data = (pois_x1, pois_y), (pois_x2, pois_y), (target_x, y[-1]) 
+  pois_data = (pois_x1, pois_y), (pois_x2, pois_y), (target_x, y[-1])
   poisoning = {}
   poisoning["data"] = (pois_data[0], pois_data[1])
   poisoning["pois"] = pois_data[2]
   auditor.poisoning = poisoning
-  
-  pois_scores, unpois_scores = auditor.run_experiments(FLAGS.num_trials,
-                                                       FLAGS.num_jobs)
 
-  thresh, _, _ = audit.compute_results(pois_scores, unpois_scores, 1,
-                              alpha=FLAGS.alpha, threshold=None)
-  
-  pois_scores, unpois_scores = auditor.run_experiments(FLAGS.num_trials,
-                                                       FLAGS.num_jobs)
-  _, eps, acc = audit.compute_results(pois_scores, unpois_scores, 1,
-                              alpha=FLAGS.alpha, threshold=thresh)
- 
+  thresh, _, _ = auditor.run(1, None, FLAGS.num_trials, alpha=FLAGS.alpha)
+
+  _, eps, acc = auditor.run(1, None, FLAGS.num_trials, alpha=FLAGS.alpha,
+                            threshold=thresh)
+
   epsilon_ub = compute_epsilon(FLAGS.batch_size)
 
-  print(f"Analysis epsilon is {epsilon_ub}.")
-  print(f"At threshold={thresh}, epsilon={eps}.")
-  print(f"The best accuracy at distinguishing poisoning is {acc}.")
+  print("Analysis epsilon is {}.".format(epsilon_ub))
+  print("At threshold={}, epsilon={}.".format(thresh, eps))
+  print("The best accuracy at distinguishing poisoning is {}.".format(acc))
 
 if __name__ == '__main__':
   app.run(main)

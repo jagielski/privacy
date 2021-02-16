@@ -12,37 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =============================================================================
-"""Training a deep NN on IMDB reviews with differentially private Adam optimizer."""
+"""Class for running auditing procedure."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import multiprocessing as mp
 import numpy as np
-from scipy import stats
-import subprocess
+from statsmodels.stats import proportion
 
 import attacks
-
-def clopper_pearson(count, trials, alpha):
-  """
-  Computes clopper pearson confidence interval.
-  Code from https://www.statsmodels.org/stable/generated/statsmodels.stats.proportion.proportion_confint.html
-  """
-  count, trials, alpha = np.array(count), np.array(trials), np.array(alpha)
-  q = count / trials
-  ci_low = stats.beta.ppf(alpha / 2., count, trials - count + 1)
-  ci_upp = stats.beta.isf(alpha / 2., count + 1, trials - count)
-
-  if np.ndim(ci_low) > 0:
-    ci_low[q == 0] = 0
-    ci_upp[q == 1] = 1
-  else:
-    ci_low = ci_low if (q != 0) else 0
-    ci_upp = ci_upp if (q != 1) else 1
-  return ci_low, ci_upp
-
 
 def compute_results(poison_scores, unpois_scores, pois_ct,
                     alpha=0.05, threshold=None):
@@ -77,71 +56,67 @@ def compute_epsilon_and_acc(poison_arr, unpois_arr, threshold, alpha, pois_ct):
   poison_ct = (poison_arr > threshold).sum()
   unpois_ct = (unpois_arr > threshold).sum()
 
-  p1, _ = clopper_pearson(poison_ct, poison_arr.size, alpha)
-  _, p0 = clopper_pearson(unpois_ct, unpois_arr.size, alpha)
+  # clopper_pearson uses alpha/2 budget on upper and lower
+  # so total budget will be 2*alpha/2 = alpha
+  p1, _ = proportion.proportion_confint(poison_ct, poison_arr.size,
+                                        alpha, method='beta')
+  _, p0 = proportion.proportion_confint(unpois_ct, unpois_arr.size,
+                                        alpha, method='beta')
 
-  print(poison_ct, unpois_ct, p1, p0)
-
-  if (p1 <= 1e-5) or (p0 >= 1 - 1e-5):
+  if (p1 <= 1e-5) or (p0 >= 1 - 1e-5):  # divide by zero issues
     return 0, 0
 
   if (p0 + p1) > 1:  # see Appendix A
     p0, p1 = (1-p1), (1-p0)
 
   epsilon = np.log(p1/p0)/pois_ct
-  acc = (p1 + (1-p0))/2
+  acc = (p1 + (1-p0))/2  # this is not necessarily the best accuracy
 
   return epsilon, acc
 
 
-class AuditAttack:
+class AuditAttack(object):
   """Audit attack class. Generates poisoning, then runs auditing algorithm."""
-  def __init__(self, trn_x, trn_y, train_function):  # name, train_script):
+  def __init__(self, trn_x, trn_y, train_function):
     """
     trn_x: training features
     trn_y: training labels
     name: identifier for the attack
-    train_script: command for running the attack
+    train_function: function returning membership score
     """
     self.trn_x, self.trn_y = trn_x, trn_y
     self.train_function = train_function
     self.poisoning = None
-    #self.train_script = train_script
-    #self.name = name
 
   def make_poisoning(self, pois_ct, attack_type, l2_norm=10):
+    """Get poisoning data."""
     return attacks.make_many_pois(self.trn_x, self.trn_y, [pois_ct],
                                   attack=attack_type, l2_norm=l2_norm)
 
-  def run_experiments(self, num_trials, num_jobs):
+  def run_experiments(self, num_trials):
     """Uses multiprocessing to run all training experiments."""
-    pool = mp.Pool(num_jobs)
-    
     (pois_x1, pois_y1), (pois_x2, pois_y2) = self.poisoning['data']
     sample_x, sample_y = self.poisoning['pois']
 
-    poison_args = [(pois_x1, pois_y1, sample_x, sample_y, i) for i in range(num_trials)]
-    unpois_args = [(pois_x2, pois_y2, sample_x, sample_y, num_trials + i) for i in range(num_trials)]
+    poison_scores = []
+    unpois_scores = []
 
-    poison_scores = pool.map(self.train_function, poison_args)
-    unpois_scores = pool.map(self.train_function, unpois_args)
+    for i in range(num_trials):
+      poison_tuple = (pois_x1, pois_y1, sample_x, sample_y, i)
+      unpois_tuple = (pois_x2, pois_y2, sample_x, sample_y, num_trials + i)
+      poison_scores.append(self.train_function(poison_tuple))
+      unpois_scores.append(self.train_function(unpois_tuple))
 
     return poison_scores, unpois_scores
 
-  def run(self, pois_ct, attack_type, num_trials, num_jobs, alpha=0.05,
+  def run(self, pois_ct, attack_type, num_trials, alpha=0.05,
           threshold=None, l2_norm=10):
-    """Complete auditing algorithm."""
+    """Complete auditing algorithm. Generates poisoning if necessary."""
     if self.poisoning is None:
-      self.poisoning = self.make_poisoning(pois_ct, attack_type, l2_norm=l2_norm)
+      self.poisoning = self.make_poisoning(pois_ct, attack_type, l2_norm)
       self.poisoning['data'] = self.poisoning[pois_ct]
-    #(pois_x1, pois_y1), (pois_x2, pois_y2) = self.poisoning[pois_ct]
-    #assert np.allclose(pois_x1, pois_x2)
-    #pois_diff = (pois_y1 - pois_y2)
-    #assert np.unique(np.nonzero(pois_diff)[0]).size == pois_ct
-    #sample_x, sample_y = self.poisoning["pois"]
-    #np.save(self.name, (pois_x1, pois_y1, pois_x2, pois_y2, sample_x, sample_y))
 
-    poison_scores, unpois_scores = self.run_experiments(num_trials, num_jobs)
+    poison_scores, unpois_scores = self.run_experiments(num_trials)
 
     results = compute_results(poison_scores, unpois_scores, pois_ct,
                               alpha=alpha, threshold=threshold)
